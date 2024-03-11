@@ -48,6 +48,9 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    public_url: {
+      type: String,
+    },
     logoURL: {
       type: String,
       default: () => {
@@ -62,10 +65,10 @@ const userSchema = new mongoose.Schema(
         }`;
       },
     },
-    noOfRef :{
-      default:0,
-      type :Number
-    }
+    noOfRef: {
+      default: 0,
+      type: Number,
+    },
   },
   { timestamps: true }
 );

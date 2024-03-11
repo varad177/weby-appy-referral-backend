@@ -45,6 +45,9 @@ const referralSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    public_url: {
+      type: String,
+    },
     logoURL: {
       type: String,
       default: () => {

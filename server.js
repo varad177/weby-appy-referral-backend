@@ -8,24 +8,13 @@ import cors from "cors";
 import User from "./schema/UserSchema.js";
 import Referral from "./schema/ReferralSchema.js";
 import Notification from "./schema/NotificationSchema.js";
-import upload from "./middleWare/upload.js";
-
-import grid from "gridfs-stream";
 import CompletedWork from "./schema/CompletedReferrel.js";
+import multer from "multer";
+import path from "path";
+import { v2 } from "cloudinary";
+import cloudinary from "cloudinary";
+import fs from "fs/promises";
 
-let gfs;
-let gridFsBucket;
-
-const conn = mongoose.connection;
-
-conn.once("open", () => {
-  gridFsBucket = new mongoose.mongo.GridFSBucket(conn.db, {
-    bucketName: "fs",
-  });
-
-  gfs = grid(conn.db, mongoose.mongo);
-  gfs.collection("fs");
-});
 //schema
 
 const server = express();
@@ -37,6 +26,38 @@ let PORT = 5000;
 
 mongoose.connect(process.env.DB_LOCATION, {
   autoIndex: true,
+});
+
+const upload = multer({
+  dest: "uploads/",
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50 mb in size max limit
+  storage: multer.diskStorage({
+    destination: "uploads/",
+    filename: (_req, file, cb) => {
+      cb(null, file.originalname);
+    },
+  }),
+  fileFilter: (_req, file, cb) => {
+    let ext = path.extname(file.originalname);
+    if (
+      ext !== ".jpg" &&
+      ext !== ".jpeg" &&
+      ext !== ".webp" &&
+      ext !== ".png" &&
+      ext !== ".mp4"
+    ) {
+      cb(new Error(`Unsupported file type! ${ext}`), false);
+      return;
+    }
+
+    cb(null, true);
+  },
+});
+
+v2.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: "DX5PLGdpT-OBOxYhTlq6l5vCNxY",
 });
 
 function getCurrentDate() {
@@ -113,32 +134,13 @@ const formatDataToSend = (user) => {
 
 //routes
 
-server.get("/file/:filename", async (req, res) => {
-  try {
-    const file = await gfs.files.findOne({ filename: req.params.filename });
 
-    if (!file) {
-      return res.status(404).json({
-        message: "File not found",
-      });
-    }
-
-    res.set("Content-Type", file.contentType);
-
-    const readStream = gridFsBucket.openDownloadStream(file._id);
-    readStream.pipe(res);
-  } catch (error) {
-    return res.status(400).json({
-      message: error.message,
-    });
-  }
-});
 
 server.post(
   "/add-referral-partner",
   upload.single("logoURL"),
-  verifyJWT,
-  (req, res) => {
+
+  async (req, res) => {
     const { _id, password, companyName, email, contact, websiteURL } = req.body;
 
     // If _id is present, update existing user
@@ -160,8 +162,22 @@ server.post(
       if (websiteURL) {
         updateObj.websiteURL = websiteURL;
       }
+
       if (req.file) {
-        updateObj.logoURL = req.file.filename;
+        const result = await cloudinary.v2.uploader.upload(req.file.path, {
+          folder: "webyAppyRefferal",
+          crop: "fill",
+        });
+
+        if (result) {
+          updateObj.public_url = result.public_id;
+          updateObj.logoURL = result.secure_url;
+
+          // Remove the file from the local system
+          fs.rm(`uploads/${req.file.filename}`);
+        } else {
+          console.log("Result not obtained");
+        }
       }
 
       // Update the user using $set
@@ -213,8 +229,26 @@ server.post(
         password: hashPassword,
         contact,
         websiteURL,
-        logoURL: req.file.filename,
       });
+
+      if (req.file) {
+        const result = await cloudinary.v2.uploader.upload(req.file.path, {
+          folder: "webyAppyRefferal",
+          crop: "fill",
+        });
+
+        if (result) {
+          user.public_url = result.public_id;
+          user.logoURL = result.secure_url;
+
+          // Remove the file from the local system
+          fs.rm(`uploads/${req.file.filename}`);
+        } else {
+          console.log("Result not obtained");
+        }
+      } else {
+        return res.status(400).json({ message: "File not found" });
+      }
 
       user
         .save()
@@ -249,7 +283,7 @@ server.post("/login", (req, res) => {
 
   User.findOne({ email: email })
     .then((user) => {
-      console.log(user);
+      
       if (!user) {
         return res.status(403).json({
           error: "user not found, contact admin to get the credentials ",
@@ -281,12 +315,11 @@ server.post(
   "/add-referrel",
   upload.single("logoURL"),
   verifyJWT,
-  (req, res) => {
+  async (req, res) => {
     const userId = req.user;
-    const referrelid = req.body.referrelid; // Add referrelid to the request body
+    const referrelid = req.body.referrelid;
 
     if (referrelid) {
-      // If referrelid is provided, update the existing referral
       const updateFields = {};
 
       if (req.body.companyName) updateFields.companyName = req.body.companyName;
@@ -295,28 +328,40 @@ server.post(
         updateFields.mobileNumber = req.body.mobileNumber;
       if (req.body.email) updateFields.email = req.body.email;
       if (req.body.websiteURL) updateFields.websiteURL = req.body.websiteURL;
-      if (req.file) updateFields.logoURL = req.file.filename;
+
+      if (req.file) {
+        const result = await cloudinary.v2.uploader.upload(req.file.path, {
+          folder: "webyAppyRefferal",
+          crop: "fill",
+        });
+
+        if (result) {
+          updateFields.public_url = result.public_id;
+          updateFields.logoURL = result.secure_url;
+
+          // Remove the file from the local system
+          fs.rm(`uploads/${req.file.filename}`);
+        }
+      }
 
       Referral.findByIdAndUpdate(
         referrelid,
         { $set: updateFields },
-        { new: true } // Return the updated document
+        { new: true }
       )
         .then((updatedReferral) => {
           if (!updatedReferral) {
             return res.status(404).json({
-              message: "Referral not found",
+              error: "Referral not found",
             });
           }
 
-          // Generate a notification
           const newNotification = new Notification({
             userId,
             referralId: updatedReferral._id,
             message: "Referral updated",
           });
 
-          // Save the notification to the database
           return Promise.all([
             newNotification.save(),
             User.updateMany(
@@ -326,7 +371,6 @@ server.post(
           ]);
         })
         .then(() => {
-          // Respond with success message for update
           res.status(200).json({ message: "Referral updated successfully" });
         })
         .catch((error) => {
@@ -341,9 +385,25 @@ server.post(
         mobileNumber: req.body.mobileNumber,
         email: req.body.email,
         websiteURL: req.body.websiteURL,
-        logoURL: req.file ? req.file.filename : undefined, // Check if file is present before setting logoURL
         referrelBy: userId,
       });
+
+      if (req.file) {
+        const result = await cloudinary.v2.uploader.upload(req.file.path, {
+          folder: "webyAppyRefferal",
+          crop: "fill",
+        });
+
+        if (result) {
+          newReferral.public_url = result.public_id;
+          newReferral.logoURL = result.secure_url;
+
+          // Remove the file from the local system
+          fs.rm(`uploads/${req.file.filename}`);
+        } else {
+          console.log("Result not obtained");
+        }
+      } 
 
       // Increment the user's field by one
       User.findByIdAndUpdate(userId, { $inc: { noOfRef: 1 } })
@@ -381,7 +441,7 @@ server.post(
 
 server.post("/user-by-id", (req, res) => {
   const { _id } = req.body;
-  console.log(_id);
+  
 
   User.findById(_id)
     .then((user) => {
@@ -392,11 +452,9 @@ server.post("/user-by-id", (req, res) => {
       }
 
       return res.status(200).json({
-        email:user.email,
+        email: user.email,
         _id: user._id,
-        logoURL: user.logoURL.toLowerCase().trim().includes("api.dicebear.com")
-          ? user.logoURL
-          : process.env.SERVER + "/file/" + user.logoURL,
+        logoURL: user.logoURL,
         companyName: user.companyName,
         role: user.role,
         notificationStatus: user.notificationStatus,
@@ -411,37 +469,110 @@ server.post("/user-by-id", (req, res) => {
     });
 });
 
-server.get("/get-all-referels", (req, res) => {
-  try {
-    Referral.find({})
-      .populate("referrelBy", "companyName")
-      .then((referrals) => {
-        // Map through each referral and modify the logoURL
-        const modifiedReferrals = referrals.map((ref) => {
-          let referrelByCompanyName = ref.referrelBy ? ref.referrelBy.companyName : "Referrer Deleted";
-          return {
-            _id: ref._id,
-            referrelBy: referrelByCompanyName,
-            companyName: ref.companyName,
-            description: ref.description,
-            mobileNumber: ref.mobileNumber,
-            email: ref.email,
-            websiteURL: ref.websiteURL,
-            logoURL: ref.logoURL
-              .toLowerCase()
-              .trim()
-              .includes("api.dicebear.com")
-              ? ref.logoURL
-              : process.env.SERVER + "/file/" + ref.logoURL,
-          };
-        });
+// server.post("/get-all-referels", async (req, res) => {
+//   let { search, page, limit } = req.body;
 
-        return res.status(200).json(modifiedReferrals);
-      });
-  } catch (error) {
-    return res.status(500).json({
-      error: error.message,
+//   let maxlimit = limit ? limit : 10;
+
+//   try {
+//     if (!search) {
+//       Referral.find({})
+//         .sort({ createdAt: -1 })
+//         .skip((page - 1) * maxlimit)
+//         .limit(maxlimit)
+//         .populate("referrelBy", "companyName")
+//         .then((referrals) => {
+//           const modifiedReferrals = referrals.map((ref) => {
+//             let referrelByCompanyName = ref.referrelBy
+//               ? ref.referrelBy.companyName
+//               : "Referrer Deleted";
+//             return {
+//               _id: ref._id,
+//               referrelBy: referrelByCompanyName,
+//               companyName: ref.companyName,
+//               description: ref.description,
+//               mobileNumber: ref.mobileNumber,
+//               email: ref.email,
+//               websiteURL: ref.websiteURL,
+//               logoURL: ref.logoURL,
+//             };
+//           });
+
+//           return res.status(200).json(modifiedReferrals);
+//         });
+//     } else {
+//       try {
+//         const searchString = String(search);
+//         console.log("Search String:", searchString); // Add logging to check search string
+
+//         const results = await Referral.find({
+//           $or: [
+//             { companyName: { $regex: new RegExp(searchString, "i") } },
+//             { mobileNumber: { $regex: new RegExp(searchString, "i") } },
+//             { email: { $regex: new RegExp(searchString, "i") } },
+//             { referrelBy: { $regex: new RegExp(searchString, "i") } },
+//           ],
+//         });
+
+//         res.status(200).json(results);
+//       } catch (error) {
+//         console.error("Error:", error); // Add logging for error
+//         res.status(500).json({ error: error.message });
+//       }
+//     }
+//   } catch (error) {
+//     console.error("Error:", error); // Add logging for error
+//     return res.status(500).json({
+//       error: error.message,
+//     });
+//   }
+// });
+
+server.post("/get-all-referels", async (req, res) => {
+  let { search, page, limit } = req.body;
+
+  let maxlimit = limit ? limit : 10;
+
+  try {
+    let query = {};
+
+    if (search) {
+      const searchString = new RegExp(search, "i");
+      query.$or = [
+        { companyName: { $regex: searchString } },
+        { email: { $regex: searchString } },
+        { mobileNumber: { $regex: searchString } },
+
+        // Add more fields here if needed
+      ];
+    }
+
+    const results = await Referral.find(query)
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * maxlimit)
+      .limit(maxlimit)
+      .populate("referrelBy", "companyName");
+
+    const modifiedReferrals = results.map((ref) => {
+      let referrelByCompanyName = ref.referrelBy
+        ? ref.referrelBy.companyName
+        : "Referrer Deleted";
+      return {
+        _id: ref._id,
+        referrelBy: referrelByCompanyName,
+        companyName: ref.companyName,
+        description: ref.description,
+        mobileNumber: ref.mobileNumber,
+        email: ref.email,
+        websiteURL: ref.websiteURL,
+        logoURL: ref.logoURL,
+      };
     });
+
+    res.status(200).json(modifiedReferrals);
+  } catch (error) {
+    console.error("Error:", error);
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -451,7 +582,9 @@ server.post("/get-referel_by_id", (req, res) => {
     Referral.findById(_id)
       .populate("referrelBy", "companyName")
       .then((ref) => {
-        let referrelByCompanyName = ref.referrelBy ? ref.referrelBy.companyName : "Referrer Deleted";
+        let referrelByCompanyName = ref.referrelBy
+          ? ref.referrelBy.companyName
+          : "Referrer Deleted";
         const referrel = {
           _id: ref._id,
           companyName: ref.companyName,
@@ -461,9 +594,7 @@ server.post("/get-referel_by_id", (req, res) => {
           referrelBy: referrelByCompanyName,
           createdAt: getCurrentDate(ref.createdAt),
           websiteURL: ref.websiteURL,
-          logoURL: ref.logoURL.toLowerCase().trim().includes("api.dicebear.com")
-            ? ref.logoURL
-            : process.env.SERVER + "/file/" + ref.logoURL,
+          logoURL: ref.logoURL,
         };
 
         return res.status(200).json(referrel);
@@ -474,7 +605,6 @@ server.post("/get-referel_by_id", (req, res) => {
     });
   }
 });
-
 
 server.post("/delete-referrel", verifyJWT, (req, res) => {
   let { _id } = req.body;
@@ -508,15 +638,14 @@ server.get("/get-all-notification", verifyJWT, async (req, res) => {
       let user = ref.userId ? ref.userId : null;
       let referral = ref.referralId ? ref.referralId : null;
 
-      let modifiedUser = user ? {
-        _id: user._id,
-        companyName: user.companyName ? user.companyName : "User Deleted",
-        logoURL: user.logoURL ? (
-          user.logoURL.toLowerCase().trim().includes("api.dicebear.com") ?
-          user.logoURL :
-          process.env.SERVER + "/file/" + user.logoURL
-        ) : null,
-      } : null;
+      let modifiedUser = user
+        ? {
+            _id: user._id,
+            companyName: user.companyName ? user.companyName : "User Deleted",
+            logoURL: user.logoURL
+             
+          }
+        : null;
 
       return {
         _id: ref._id,
@@ -537,7 +666,6 @@ server.get("/get-all-notification", verifyJWT, async (req, res) => {
     });
   }
 });
-
 
 server.post("/delete-notification", verifyJWT, async (req, res) => {
   try {
@@ -568,15 +696,11 @@ server.get("/get-all-users", (req, res) => {
         const updatedUsers = users.map((user) => {
           return {
             ...user._doc,
-            logoURL:
-              user.logoURL &&
-              user.logoURL.toLowerCase().trim().includes("api.dicebear.com")
-                ? user.logoURL
-                : process.env.SERVER + "/file/" + user.logoURL,
+            logoURL: user.logoURL && user.logoURL,
           };
         });
 
-        console.log(updatedUsers);
+       
         return res.status(200).json(updatedUsers);
       })
       .catch((err) => {
@@ -621,7 +745,6 @@ server.post("/assign-task", verifyJWT, async (req, res) => {
 //           error: "User not found",
 //         });
 //       }
-      
 
 //       return res.status(200).json(user);
 //     })
@@ -652,7 +775,7 @@ server.post("/get-user", (req, res) => {
       }
 
       return res.status(200).json({
-        email :user.email,
+        email: user.email,
         _id: user._id,
         logoURL: logoURL,
         companyName: user.companyName,
@@ -662,7 +785,7 @@ server.post("/get-user", (req, res) => {
         role: user.role,
         notificationStatus: user.notificationStatus,
         task: user.task,
-        noOfRef: user.noOfRef
+        noOfRef: user.noOfRef,
       });
     })
     .catch((error) => {
@@ -672,7 +795,6 @@ server.post("/get-user", (req, res) => {
       });
     });
 });
-
 
 server.post("/delete-referrer", verifyJWT, (req, res) => {
   let { _id } = req.body;
@@ -694,7 +816,7 @@ server.post("/delete-referrer", verifyJWT, (req, res) => {
 
 server.post("/user-profile-by-id", (req, res) => {
   const { _id } = req.body;
-  console.log(_id);
+
 
   User.findById(_id)
     .then((user) => {
@@ -706,9 +828,7 @@ server.post("/user-profile-by-id", (req, res) => {
 
       return res.status(200).json({
         _id: user._id,
-        logoURL: user.logoURL.toLowerCase().trim().includes("api.dicebear.com")
-          ? user.logoURL
-          : process.env.SERVER + "/file/" + user.logoURL,
+        logoURL: user.logoURL,
         companyName: user.companyName,
         role: user.role,
         notificationStatus: user.notificationStatus,
@@ -738,7 +858,7 @@ server.post("/get-all-admin-referels", verifyJWT, async (req, res) => {
   }
 
   const { workDone } = req.body;
-  console.log(workDone);
+
 
   let query = {};
 
@@ -748,10 +868,15 @@ server.post("/get-all-admin-referels", verifyJWT, async (req, res) => {
   }
 
   try {
-    const referrals = await Referral.find(query).populate("referrelBy", "companyName");
+    const referrals = await Referral.find(query).populate(
+      "referrelBy",
+      "companyName"
+    );
 
     const modifiedReferrals = referrals.map((ref) => {
-      let referrelByCompanyName = ref.referrelBy ? ref.referrelBy.companyName : "Referrer Deleted";
+      let referrelByCompanyName = ref.referrelBy
+        ? ref.referrelBy.companyName
+        : "Referrer Deleted";
       return {
         _id: ref._id,
         referrelBy: referrelByCompanyName,
@@ -762,9 +887,7 @@ server.post("/get-all-admin-referels", verifyJWT, async (req, res) => {
         websiteURL: ref.websiteURL,
         workDone: ref.workDone,
         createdAt: getCurrentDate(ref.createdAt),
-        logoURL: ref.logoURL.toLowerCase().trim().includes("api.dicebear.com")
-          ? ref.logoURL
-          : process.env.SERVER + "/file/" + ref.logoURL,
+        logoURL: ref.logoURL
       };
     });
 
@@ -775,7 +898,6 @@ server.post("/get-all-admin-referels", verifyJWT, async (req, res) => {
     });
   }
 });
-
 
 server.post("/change-work-status", verifyJWT, (req, res) => {
   if (req.role !== "admin") {
@@ -958,6 +1080,17 @@ server.get("/complete-analytics/monthly", verifyJWT, (req, res) => {
       console.error("Error fetching monthly analytics data:", error);
       res.status(500).json({ error: error.message });
     });
+});
+
+server.get("/get-entries-count", async (req, res) => {
+  try {
+    const count = await Referral.find({}).count();
+    return res.status(200).json(count);
+  } catch (error) {
+    return res.status(400).json({
+      error: error.message,
+    });
+  }
 });
 
 server.listen(PORT, () => {
