@@ -9,11 +9,13 @@ import User from "./schema/UserSchema.js";
 import Referral from "./schema/ReferralSchema.js";
 import Notification from "./schema/NotificationSchema.js";
 import CompletedWork from "./schema/CompletedReferrel.js";
+import moment from "moment/moment.js";
 import multer from "multer";
 import path from "path";
 import { v2 } from "cloudinary";
 import cloudinary from "cloudinary";
 import fs from "fs/promises";
+import sendEmailForPassword from "./sendMail/sendMailForPassword.js";
 
 //schema
 
@@ -133,8 +135,6 @@ const formatDataToSend = (user) => {
 };
 
 //routes
-
-
 
 server.post(
   "/add-referral-partner",
@@ -283,7 +283,6 @@ server.post("/login", (req, res) => {
 
   User.findOne({ email: email })
     .then((user) => {
-      
       if (!user) {
         return res.status(403).json({
           error: "user not found, contact admin to get the credentials ",
@@ -403,7 +402,7 @@ server.post(
         } else {
           console.log("Result not obtained");
         }
-      } 
+      }
 
       // Increment the user's field by one
       User.findByIdAndUpdate(userId, { $inc: { noOfRef: 1 } })
@@ -441,7 +440,6 @@ server.post(
 
 server.post("/user-by-id", (req, res) => {
   const { _id } = req.body;
-  
 
   User.findById(_id)
     .then((user) => {
@@ -642,8 +640,7 @@ server.get("/get-all-notification", verifyJWT, async (req, res) => {
         ? {
             _id: user._id,
             companyName: user.companyName ? user.companyName : "User Deleted",
-            logoURL: user.logoURL
-             
+            logoURL: user.logoURL,
           }
         : null;
 
@@ -700,7 +697,6 @@ server.get("/get-all-users", (req, res) => {
           };
         });
 
-       
         return res.status(200).json(updatedUsers);
       })
       .catch((err) => {
@@ -769,10 +765,7 @@ server.post("/get-user", (req, res) => {
 
       let logoURL = user.logoURL;
 
-      // Check if logoURL is a local file or from api.dicebear.com
-      if (!logoURL.toLowerCase().trim().includes("api.dicebear.com")) {
-        logoURL = process.env.SERVER + "/file/" + logoURL;
-      }
+    
 
       return res.status(200).json({
         email: user.email,
@@ -817,7 +810,6 @@ server.post("/delete-referrer", verifyJWT, (req, res) => {
 server.post("/user-profile-by-id", (req, res) => {
   const { _id } = req.body;
 
-
   User.findById(_id)
     .then((user) => {
       if (!user) {
@@ -859,7 +851,6 @@ server.post("/get-all-admin-referels", verifyJWT, async (req, res) => {
 
   const { workDone } = req.body;
 
-
   let query = {};
 
   // Check if workDone status is provided and add it to the query
@@ -887,7 +878,7 @@ server.post("/get-all-admin-referels", verifyJWT, async (req, res) => {
         websiteURL: ref.websiteURL,
         workDone: ref.workDone,
         createdAt: getCurrentDate(ref.createdAt),
-        logoURL: ref.logoURL
+        logoURL: ref.logoURL,
       };
     });
 
@@ -1092,6 +1083,193 @@ server.get("/get-entries-count", async (req, res) => {
     });
   }
 });
+
+// pass word
+
+server.post("/change-password", verifyJWT, (req, res) => {
+  let { currentPassword, newPassword } = req.body;
+
+  User.findOne({ _id: req.user })
+    .then((user) => {
+      bcrypt.compare(currentPassword, user.password, (err, result) => {
+        if (err) {
+          return res.status(500).json({
+            error:
+              "some error while changing the password, pleased try again later",
+          });
+        }
+
+        if (!result) {
+          return res.status(403).json({
+            error: "Current Password is incorrect!",
+          });
+        }
+
+        bcrypt.hash(newPassword, 10, (err, hased_Password) => {
+          User.findOneAndUpdate({ _id: req.user }, { password: hased_Password })
+            .then((u) => {
+              return res.status(200).json({
+                message: "password change sucessfully",
+              });
+            })
+            .catch((err) => {
+              return res.status(500).json({
+                error: "error while saving new password pleased try later",
+              });
+            });
+        });
+      });
+    })
+    .catch((err) => {
+      return res.status(500).json({
+        error: "user not found",
+      });
+    });
+});
+
+server.post("/reset-password", async (req, res) => {
+  try {
+    const { token, newPassword } = req.body;
+
+    if (!token || !newPassword) {
+      return res
+        .status(400)
+        .json({ error: "Token and newPassword are required." });
+    }
+
+    try {
+      // Verify the reset token
+      const decodedToken = jwt.verify(token, process.env.SECRETE_KEY);
+
+      // Find the user associated with the reset token
+      const user = await User.findById(decodedToken.userId);
+
+      if (!user) {
+        return res.status(404).json({ message: "User not found." });
+      }
+
+      // Update the user's password
+      const hashedPassword = await bcrypt.hash(newPassword, 10);
+      user.password = hashedPassword;
+      await user.save();
+
+      return res.status(200).json({ message: "Password reset successfully." });
+    } catch (error) {
+      if (error instanceof jwt.TokenExpiredError) {
+        return res.status(401).json({ error: "Token has expired." });
+      }
+
+      throw error; // Re-throw other JWT verification errors
+    }
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+server.post("/forgot-password", async (req, res) => {
+  try {
+    let { email } = req.body;
+
+
+    const user = await User.findOne({ email: email });
+
+    if (!user) {
+      return res.status(404).json({
+        error: "User not found with the provided email.",
+      });
+    }
+
+    const resetToken = jwt.sign({ userId: user._id }, process.env.SECRETE_KEY, {
+      expiresIn: "1h",
+    });
+
+    // Construct the reset password URL with the reset token
+    const resetUrl = `${process.env.FRONTENDURL}/reset-your-password?token=${resetToken}`;
+    console.log(resetUrl);
+
+    // Send an email to the user with the reset URL
+    await sendEmailForPassword(user.email, "Password Reset", resetUrl);
+
+    return res.status(200).json({
+      message:
+        "Email is sent to your entered email address with the password reset instructions.",
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      error: error.message,
+    });
+  }
+});
+
+
+server.get('/pie-chart-data', async (req, res) => {
+  try {
+    const seriesData = []; // Array to hold data for each month's pie chart
+
+    // Get the current date
+    const currentDate = new Date();
+
+    // Iterate over the last 12 months to aggregate data for each month
+    for (let i = 0; i < 12; i++) {
+      // Construct the start date of the current month
+      const startDateOfMonth = moment(currentDate).subtract(i, 'months').startOf('month').toDate();
+      const endDateOfMonth = moment(currentDate).subtract(i, 'months').endOf('month').toDate();
+
+      // Aggregate the number of referrals per company for the current month
+      const referralData = await Referral.aggregate([
+        {
+          $match: {
+            createdAt: { $gte: startDateOfMonth, $lte: endDateOfMonth }
+          }
+        },
+        {
+          $lookup: {
+            from: 'users', // Collection name of User model
+            localField: 'referrelBy',
+            foreignField: '_id',
+            as: 'user'
+          }
+        },
+        {
+          $unwind: '$user' // Unwind the array created by $lookup
+        },
+        {
+          $group: {
+            _id: '$user.companyName', // Use companyName from User model
+            noOfReferrals: { $sum: 1 } // Count the number of referrals
+          }
+        }
+      ]);
+
+      // Calculate the total number of referrals for the current month
+      const totalReferrals = referralData.reduce((acc, cur) => acc + cur.noOfReferrals, 0);
+
+      // Format the data for the current month's pie chart
+      const monthSeriesData = referralData.map((entry, index) => ({
+        id: index,
+        value: entry.noOfReferrals,
+        label: entry._id, // Use company name as label
+        year: startDateOfMonth.getFullYear(), // Include the year
+      }));
+
+      // Push the formatted data for the current month to seriesData array
+      seriesData.push({
+        month: moment(startDateOfMonth).format('MMMM'), // Format month name only
+        year: startDateOfMonth.getFullYear(), // Include the year for the month
+        totalReferrals: totalReferrals, // Include total referrals for the month
+        data: monthSeriesData
+      });
+    }
+
+    return res.status(200).json(seriesData); // Send the formatted data for 12 months as JSON response
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
 
 server.listen(PORT, () => {
   console.log(`listing on ${PORT}`);
